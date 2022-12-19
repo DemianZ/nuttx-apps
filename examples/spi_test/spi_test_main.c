@@ -23,13 +23,27 @@
  ****************************************************************************/
 
 #include <assert.h>
-#include <sys/ioctl.h>
+#include <fcntl.h>
 #include <nuttx/config.h>
 #include <nuttx/spi/spi.h>
+#include <sys/ioctl.h>
+#include <stdlib.h>
 #include <stdio.h>
-#include <fcntl.h>
 
+
+/****************************************************************************
+ * Private Data
+ ****************************************************************************/
 static const int SPI_PORT_TEST = 1; 
+static bool g_spi_task1_daemon_started = 0;
+
+/****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: spi_char_driver_write
+ ****************************************************************************/
 
 // TODO: Implement write operation for SPI driver
 static int spi_char_driver_write(uint8_t * data, size_t len)    
@@ -48,7 +62,12 @@ static int spi_char_driver_write(uint8_t * data, size_t len)
     printf("SPI Data sent\n");
     close(fd);
     printf("SPI Closed\n");
+    return 0;
 }
+
+/****************************************************************************
+ * Name: spi_dummy_byte_write
+ ****************************************************************************/
 
 static int spi_dummy_byte_write(struct spi_dev_s * spi, uint8_t byte)
 {
@@ -63,13 +82,89 @@ static int spi_dummy_byte_write(struct spi_dev_s * spi, uint8_t byte)
   return 0;
 }
 
+/****************************************************************************
+ * Name: spi_bus_init
+ ****************************************************************************/
+
 static int spi_bus_init(struct spi_dev_s ** spi, uint8_t spi_port)
 {
-  *spi = stm32_spibus_initialize(spi_port);
+  *spi = (struct spi_dev_s *)stm32_spibus_initialize(spi_port);
   if (spi == NULL) {
     return -ENODEV;
   }
   return 0;
+}
+
+
+/****************************************************************************
+ * Name: sigterm_action
+ ****************************************************************************/
+
+static void sigterm_action(int signo, siginfo_t *siginfo, void *arg)
+{
+  if (signo == SIGTERM)
+  {
+    printf("SIGTERM received\n");
+    g_spi_task1_daemon_started = false;
+    printf("spi_test_daemon: Terminated.\n");
+  }
+  else {
+    printf("\nsigterm_action: Received signo=%d siginfo=%p arg=%p\n", signo, siginfo, arg);
+  }
+}
+
+static int error_handler() 
+{
+  g_spi_task1_daemon_started = false;
+  printf("spi_test_daemon: Terminating\n");
+  return EXIT_FAILURE;
+}
+
+static int spi_test_task1(int argc, char *argv[]) 
+{
+  pid_t mypid;
+  struct sigaction act;
+
+  /* SIGTERM handler */
+
+  memset(&act, 0, sizeof(struct sigaction));
+  act.sa_sigaction = sigterm_action;
+  act.sa_flags     = SA_SIGINFO;
+
+  sigemptyset(&act.sa_mask);
+  sigaddset(&act.sa_mask, SIGTERM);
+
+  int ret = sigaction(SIGTERM, &act, NULL);
+  if (ret != 0) {
+    fprintf(stderr, "Failed to install SIGTERM handler, errno=%d\n", errno);
+    exit(error_handler());
+  }
+
+  mypid = getpid();
+  g_spi_task1_daemon_started = true;
+  printf("\nspi_task1_daemon (pid# %d): Running\n", mypid);
+
+  struct spi_dev_s * test_spi;
+  ret = spi_bus_init(&test_spi, SPI_PORT_TEST);
+  if(ret) {
+    fprintf(stderr, "Failed to initialize SPI port %d\n", SPI_PORT_TEST);
+    exit(error_handler());
+  }
+  printf("SPI%d Initialized\n", SPI_PORT_TEST);
+
+  uint16_t counter = 0;
+  while (g_spi_task1_daemon_started == true) {
+    if(spi_dummy_byte_write(test_spi, counter)) 
+    {
+      fprintf(stderr, "Error sending SPI data\n");
+      exit(error_handler());
+    };
+    printf("SPI Data sent: %d\n", counter);
+    counter++;
+    usleep(1000 * 1000L);
+  }
+
+  exit(EXIT_SUCCESS);
 }
 
 /****************************************************************************
@@ -82,25 +177,20 @@ static int spi_bus_init(struct spi_dev_s ** spi, uint8_t spi_port)
 
 int main(int argc, FAR char *argv[])
 {
-
-  struct spi_dev_s * test_spi;
-
-  int ret = spi_bus_init(&test_spi, SPI_PORT_TEST);
-  if(ret) {
-    printf("ERROR: Failed to initialize SPI port %d\n", SPI_PORT_TEST);
-    return ret;
-  }
-  printf("SPI%d initialized\n", SPI_PORT_TEST);
-
-  uint16_t counter = 0;
-  while(counter++ < 100) {
-    if(spi_dummy_byte_write(test_spi, counter)) {
-      printf("Error sending SPI data\n");
-      return -1;  
-    };
+  int ret = task_create(
+    "spi_task1", 
+    CONFIG_EXAMPLES_SPI_TEST_PRIORITY,
+    CONFIG_EXAMPLES_SPI_TEST_STACKSIZE, 
+    spi_test_task1,
+    NULL);
+    
+  if (ret < 0) {
+    int errcode = errno;
+    fprintf(stderr, "Failed to start spi_task1: %d\n", errcode);
+    return EXIT_FAILURE;
   }
 
-  printf("SPI Data sent\n");
+  printf("spi_test_main: spi tasks started\n");
 
-  return 0;
+  return EXIT_SUCCESS;
 }
