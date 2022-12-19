@@ -26,6 +26,7 @@
 #include <fcntl.h>
 #include <nuttx/config.h>
 #include <nuttx/spi/spi.h>
+ #include <mqueue.h>
 #include <sys/ioctl.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -43,7 +44,16 @@ struct spi_dev_s * test_spi;
 static const int SPI_PORT_TEST = 1; 
 static bool g_spi_task1_daemon_started = 0;
 static bool g_spi_task2_daemon_started = 0;
+static bool g_spi_task_sender_daemon_started = 0;
 static const size_t MATRIX_DIM = 3;
+
+static struct mq_attr spi_mq_attr = {
+  .mq_curmsgs = 0,
+  .mq_flags = 0,
+  .mq_maxmsg = 10,
+  .mq_msgsize = 10
+};
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -70,23 +80,6 @@ static int spi_char_driver_write(uint8_t * data, size_t len)
     close(fd);
     printf("SPI Closed\n");
     return 0;
-}
-
-/****************************************************************************
- * Name: spi_dummy_byte_write
- ****************************************************************************/
-
-static int spi_dummy_byte_write(struct spi_dev_s * spi, uint8_t byte)
-{
-  if(spi == NULL){
-    return -1;
-  }
-  
-  SPI_SELECT(spi, 0, true);
-  SPI_SEND(spi, byte);
-  SPI_SELECT(spi, 0, false);
-
-  return 0;
 }
 
 /****************************************************************************
@@ -128,6 +121,9 @@ static int spi_bus_init(struct spi_dev_s ** spi, uint8_t spi_port)
 static int error_handler() 
 {
   g_spi_task1_daemon_started = false;
+  g_spi_task2_daemon_started = false;
+  g_spi_task_sender_daemon_started = false;
+  
   printf("spi_test_daemon: Terminating\n");
   return EXIT_FAILURE;
 }
@@ -203,6 +199,11 @@ static int spi_send_matrix(int matrix[MATRIX_DIM][MATRIX_DIM])
   return spi_dummy_write(test_spi, buf, buf_len);
 }
 
+void spi_send_from_queue(uint8_t * data, size_t len)
+{
+
+}
+
 
 /****************************************************************************
  * Name: spi_test_task1
@@ -210,23 +211,32 @@ static int spi_send_matrix(int matrix[MATRIX_DIM][MATRIX_DIM])
 
 static int spi_test_task1(int argc, char *argv[]) 
 {
+
   pid_t mypid;
   mypid = getpid();
   g_spi_task1_daemon_started = true;
   printf("spi_task1_daemon (pid# %d): Running\n", mypid);
 
+  mqd_t mq_spi;
+  mq_spi = mq_open("mq_spi", O_RDWR|O_CREAT, 0666, &spi_mq_attr);
+  if (mq_spi == -1) {
+    fprintf(stderr, "spi_send queue not opened: %d\n", errno);
+    exit(error_handler());
+  }
+
   uint16_t counter = 0;
   while (g_spi_task1_daemon_started == true) {
-    if(spi_dummy_byte_write(test_spi, counter)) 
-    {
-      fprintf(stderr, "Error sending SPI data\n");
-      exit(error_handler());
-    };
-    printf("SPI Data sent: %d\n", counter);
+
+    int status = mq_send(mq_spi, &counter, sizeof(counter), 100);
+    if (status < 0) {
+      printf("ERROR mq_send failure=%d\n", status);
+    }
+    printf("SPI counter sent to queue: %d\n", counter);
     counter++;
     usleep(1000 * 1000L);
   }
 
+  mq_close(mq_spi);
   exit(EXIT_SUCCESS);
 }
 
@@ -244,7 +254,14 @@ static int spi_test_task2(int argc, char *argv[])
   int matrix1[MATRIX_DIM][MATRIX_DIM];
   int matrix2[MATRIX_DIM][MATRIX_DIM];
   int mult_matrix[MATRIX_DIM][MATRIX_DIM];
-  
+
+  mqd_t mq_spi;
+  mq_spi = mq_open("mq_spi", O_RDWR|O_CREAT, 0666, &spi_mq_attr);
+  if (mq_spi == -1) {
+    fprintf(stderr, "spi_send queue not opened: %d\n", errno);
+    exit(error_handler());
+  }
+
   while (g_spi_task2_daemon_started == true) {
 
     generate_rand_matrix(matrix1);
@@ -257,12 +274,59 @@ static int spi_test_task2(int argc, char *argv[])
     print_matrix(mult_matrix);
 #endif
 
-    spi_send_matrix(mult_matrix);
+    const uint8_t buf_len = MATRIX_DIM*MATRIX_DIM;
+    uint8_t buf[buf_len];
+    for(size_t i = 0; i < MATRIX_DIM; i++) {
+      for(size_t j = 0; j < MATRIX_DIM; j++) {
+        buf[i*3 + j] = mult_matrix[i][j];
+      }
+    }
 
-    printf("SPI matrix sent\n");
+    int status = mq_send(mq_spi, buf, buf_len, 100);
+    if (status < 0) {
+      printf("ERROR mq_send failure=%d\n", status);
+    }
+    
+    printf("SPI matrix sent to queue\n");
     usleep(1000 * 1000L);
   }
 
+  mq_close(mq_spi);
+  exit(EXIT_SUCCESS);
+}
+
+/****************************************************************************
+ * Name: spi_sender_task
+ ****************************************************************************/
+
+static int spi_sender_task(int argc, char *argv[]) 
+{
+  pid_t mypid;  
+  mypid = getpid();
+  g_spi_task_sender_daemon_started = true;
+  printf("spi_sender_task_daemon (pid# %d): Running\n", mypid);
+
+  mqd_t mq_spi;
+  mq_spi = mq_open("mq_spi", O_RDWR|O_CREAT, 0666, &spi_mq_attr);
+  if (mq_spi == -1) {
+    fprintf(stderr, "spi_send queue not opened: %d\n", errno);
+    exit(error_handler());
+  }
+
+  uint8_t queue_rx_buf[20];
+  int prio=100;
+  while (g_spi_task_sender_daemon_started == true) {
+    size_t nbytes = mq_receive(mq_spi, queue_rx_buf, 20, &prio);
+    if(nbytes > 0) {
+      if(spi_dummy_write(test_spi, queue_rx_buf, nbytes)) {
+        fprintf(stderr, "SPI write failed\n");
+      } else {
+        printf("SPI sent %i bytes\n", nbytes);
+      }
+    }
+  }
+
+  mq_close(mq_spi);
   exit(EXIT_SUCCESS);
 }
 
@@ -284,16 +348,40 @@ int main(int argc, FAR char *argv[])
   }
   printf("SPI%d Initialized\n", SPI_PORT_TEST);
 
+  
+  ret = task_create(
+    "spi_task1", 
+    CONFIG_EXAMPLES_SPI_TEST_PRIORITY,
+    CONFIG_EXAMPLES_SPI_TEST_STACKSIZE, 
+    spi_test_task1,
+    NULL);
+  if (ret < 0) {
+    int errcode = errno;
+    fprintf(stderr, "Failed to start spi_task2: %d\n", errcode);
+    return EXIT_FAILURE;
+  }
+
   ret = task_create(
     "spi_task2", 
     CONFIG_EXAMPLES_SPI_TEST_PRIORITY,
     CONFIG_EXAMPLES_SPI_TEST_STACKSIZE, 
     spi_test_task2,
     NULL);
- 
   if (ret < 0) {
     int errcode = errno;
     fprintf(stderr, "Failed to start spi_task2: %d\n", errcode);
+    return EXIT_FAILURE;
+  }
+
+  ret = task_create(
+    "spi_sender_task", 
+    CONFIG_EXAMPLES_SPI_TEST_PRIORITY,
+    CONFIG_EXAMPLES_SPI_TEST_STACKSIZE, 
+    spi_sender_task,
+    NULL);
+  if (ret < 0) {
+    int errcode = errno;
+    fprintf(stderr, "Failed to start spi_task_sender: %d\n", errcode);
     return EXIT_FAILURE;
   }
 
