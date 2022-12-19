@@ -22,12 +22,55 @@
  * Included Files
  ****************************************************************************/
 
+#include <assert.h>
+#include <sys/ioctl.h>
 #include <nuttx/config.h>
 #include <nuttx/spi/spi.h>
 #include <stdio.h>
+#include <fcntl.h>
 
+static const int SPI_PORT_TEST = 1; 
 
-static const int TEST_SPI_PORT = 1; 
+// TODO: Implement write operation for SPI driver
+static int spi_char_driver_write(uint8_t * data, size_t len)    
+{
+    int fd = open("/dev/spi1", O_RDWR);
+    if(fd < 0) {
+      printf("Error opening SPI\n");
+      return -1;
+    }
+    printf("SPI Opened\n");
+    int bytes_written = write(fd, data, len); // write operation is not implemented
+    if(bytes_written != len) {
+        printf("Error sending\n");
+        return -2;
+    }
+    printf("SPI Data sent\n");
+    close(fd);
+    printf("SPI Closed\n");
+}
+
+static int spi_dummy_byte_write(struct spi_dev_s * spi, uint8_t byte)
+{
+  if(spi == NULL){
+    return -1;
+  }
+  
+  SPI_SELECT(spi, 0, true);
+  SPI_SEND(spi, byte);
+  SPI_SELECT(spi, 0, false);
+
+  return 0;
+}
+
+static int spi_bus_init(struct spi_dev_s ** spi, uint8_t spi_port)
+{
+  *spi = stm32_spibus_initialize(spi_port);
+  if (spi == NULL) {
+    return -ENODEV;
+  }
+  return 0;
+}
 
 /****************************************************************************
  * Public Functions
@@ -39,24 +82,25 @@ static const int TEST_SPI_PORT = 1;
 
 int main(int argc, FAR char *argv[])
 {
-  struct spi_dev_s *spi;
 
-  spi = stm32_spibus_initialize(TEST_SPI_PORT);
-  if (spi == NULL)
-  {
-    printf("ERROR: Failed to initialize SPI port %d\n", TEST_SPI_PORT);
-    return -ENODEV;
+  struct spi_dev_s * test_spi;
+
+  int ret = spi_bus_init(&test_spi, SPI_PORT_TEST);
+  if(ret) {
+    printf("ERROR: Failed to initialize SPI port %d\n", SPI_PORT_TEST);
+    return ret;
   }
-  printf("SPI%d initialized\n", TEST_SPI_PORT);
+  printf("SPI%d initialized\n", SPI_PORT_TEST);
 
-  SPI_SELECT(spi, 0, true);
-  SPI_SEND(spi, 0xAA);
-  SPI_SEND(spi, 0x00);
-  SPI_SEND(spi, 0xAA);
-  SPI_SELECT(spi, 0, false);
+  uint16_t counter = 0;
+  while(counter++ < 100) {
+    if(spi_dummy_byte_write(test_spi, counter)) {
+      printf("Error sending SPI data\n");
+      return -1;  
+    };
+  }
 
   printf("SPI Data sent\n");
-
 
   return 0;
 }
