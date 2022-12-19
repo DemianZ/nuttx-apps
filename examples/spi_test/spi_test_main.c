@@ -32,11 +32,18 @@
 
 
 /****************************************************************************
+ * Module Defines
+ ****************************************************************************/
+#define PRINT_MATRIX  (0)
+
+/****************************************************************************
  * Private Data
  ****************************************************************************/
+struct spi_dev_s * test_spi;
 static const int SPI_PORT_TEST = 1; 
 static bool g_spi_task1_daemon_started = 0;
-
+static bool g_spi_task2_daemon_started = 0;
+static const size_t MATRIX_DIM = 3;
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -83,6 +90,25 @@ static int spi_dummy_byte_write(struct spi_dev_s * spi, uint8_t byte)
 }
 
 /****************************************************************************
+ * Name: spi_dummy_write
+ ****************************************************************************/
+
+static int spi_dummy_write(struct spi_dev_s * spi, uint8_t * data, size_t len)
+{
+  if(spi == NULL){
+    return -1;
+  }
+  
+  SPI_SELECT(spi, 0, true);
+  for(size_t i = 0; i < len; i++) {
+    SPI_SEND(spi, data[i]);
+  }
+  SPI_SELECT(spi, 0, false);
+
+  return 0;
+}
+
+/****************************************************************************
  * Name: spi_bus_init
  ****************************************************************************/
 
@@ -95,23 +121,9 @@ static int spi_bus_init(struct spi_dev_s ** spi, uint8_t spi_port)
   return 0;
 }
 
-
 /****************************************************************************
- * Name: sigterm_action
+ * Name: error_handler
  ****************************************************************************/
-
-static void sigterm_action(int signo, siginfo_t *siginfo, void *arg)
-{
-  if (signo == SIGTERM)
-  {
-    printf("SIGTERM received\n");
-    g_spi_task1_daemon_started = false;
-    printf("spi_test_daemon: Terminated.\n");
-  }
-  else {
-    printf("\nsigterm_action: Received signo=%d siginfo=%p arg=%p\n", signo, siginfo, arg);
-  }
-}
 
 static int error_handler() 
 {
@@ -120,37 +132,88 @@ static int error_handler()
   return EXIT_FAILURE;
 }
 
+
+/****************************************************************************
+ * Name: generate_rand_matrix
+ ****************************************************************************/
+
+static void generate_rand_matrix(int matrix[MATRIX_DIM][MATRIX_DIM])
+{
+  for(size_t i=0; i < MATRIX_DIM; i++){
+    for(size_t j=0; j < MATRIX_DIM; j++) {
+      matrix[i][j] = rand();
+    }
+  }
+}
+
+/****************************************************************************
+ * Name: print_matrix
+ ****************************************************************************/
+
+static void print_matrix(int matrix[MATRIX_DIM][MATRIX_DIM])
+{
+  for(size_t i = 0; i < MATRIX_DIM; i++) {
+    for(size_t j = 0; j < MATRIX_DIM; j++) {
+      printf("%d ", matrix[i][j]);
+    }
+    printf("\n");
+  }
+  printf("\n");
+}
+
+/****************************************************************************
+ * Name: multiply_matrix
+ ****************************************************************************/
+
+static void multiply_matrix(
+  int matrix1[MATRIX_DIM][MATRIX_DIM],
+  int matrix2[MATRIX_DIM][MATRIX_DIM],  
+  int res_matrix[MATRIX_DIM][MATRIX_DIM]) {
+  // Initializing elements of res_matrix to 0
+	for(size_t i = 0; i < MATRIX_DIM; ++i) {
+		for(size_t j = 0; j < MATRIX_DIM; ++j) {
+			res_matrix[i][j] = 0;
+		}
+	}
+
+  // Multiply matrix elements
+  // TODO: handle MAX_INT overflow
+  for(size_t i = 0; i < MATRIX_DIM; i++) {
+		for(size_t j = 0; j < MATRIX_DIM; j++) {
+			for(size_t k = 0; k < MATRIX_DIM; k++) {
+				res_matrix[i][j] += matrix1[i][k] * matrix2[k][j]; 
+			}
+		}
+	}
+}
+
+/****************************************************************************
+ * Name: spi_send_matrix
+ ****************************************************************************/
+
+static int spi_send_matrix(int matrix[MATRIX_DIM][MATRIX_DIM])
+{
+  const uint8_t buf_len = MATRIX_DIM*MATRIX_DIM;
+  uint8_t buf[buf_len];
+  for(size_t i = 0; i < MATRIX_DIM; i++) {
+		for(size_t j = 0; j < MATRIX_DIM; j++) {
+			buf[i*3 + j] = matrix[i][j];
+		}
+	}
+  return spi_dummy_write(test_spi, buf, buf_len);
+}
+
+
+/****************************************************************************
+ * Name: spi_test_task1
+ ****************************************************************************/
+
 static int spi_test_task1(int argc, char *argv[]) 
 {
   pid_t mypid;
-  struct sigaction act;
-
-  /* SIGTERM handler */
-
-  memset(&act, 0, sizeof(struct sigaction));
-  act.sa_sigaction = sigterm_action;
-  act.sa_flags     = SA_SIGINFO;
-
-  sigemptyset(&act.sa_mask);
-  sigaddset(&act.sa_mask, SIGTERM);
-
-  int ret = sigaction(SIGTERM, &act, NULL);
-  if (ret != 0) {
-    fprintf(stderr, "Failed to install SIGTERM handler, errno=%d\n", errno);
-    exit(error_handler());
-  }
-
   mypid = getpid();
   g_spi_task1_daemon_started = true;
-  printf("\nspi_task1_daemon (pid# %d): Running\n", mypid);
-
-  struct spi_dev_s * test_spi;
-  ret = spi_bus_init(&test_spi, SPI_PORT_TEST);
-  if(ret) {
-    fprintf(stderr, "Failed to initialize SPI port %d\n", SPI_PORT_TEST);
-    exit(error_handler());
-  }
-  printf("SPI%d Initialized\n", SPI_PORT_TEST);
+  printf("spi_task1_daemon (pid# %d): Running\n", mypid);
 
   uint16_t counter = 0;
   while (g_spi_task1_daemon_started == true) {
@@ -168,6 +231,43 @@ static int spi_test_task1(int argc, char *argv[])
 }
 
 /****************************************************************************
+ * Name: spi_test_task2
+ ****************************************************************************/
+
+static int spi_test_task2(int argc, char *argv[]) 
+{
+  pid_t mypid;  
+  mypid = getpid();
+  g_spi_task2_daemon_started = true;
+  printf("spi_task2_daemon (pid# %d): Running\n", mypid);
+
+  int matrix1[MATRIX_DIM][MATRIX_DIM];
+  int matrix2[MATRIX_DIM][MATRIX_DIM];
+  int mult_matrix[MATRIX_DIM][MATRIX_DIM];
+  
+  while (g_spi_task2_daemon_started == true) {
+
+    generate_rand_matrix(matrix1);
+    generate_rand_matrix(matrix2);
+    multiply_matrix(matrix1, matrix2, mult_matrix);
+
+#if(PRINT_MATRIX)
+    print_matrix(matrix1);
+    print_matrix(matrix2);
+    print_matrix(mult_matrix);
+#endif
+
+    spi_send_matrix(mult_matrix);
+
+    printf("SPI matrix sent\n");
+    usleep(1000 * 1000L);
+  }
+
+  exit(EXIT_SUCCESS);
+}
+
+
+/****************************************************************************
  * Public Functions
  ****************************************************************************/
 
@@ -177,16 +277,23 @@ static int spi_test_task1(int argc, char *argv[])
 
 int main(int argc, FAR char *argv[])
 {
-  int ret = task_create(
-    "spi_task1", 
+  int ret = spi_bus_init(&test_spi, SPI_PORT_TEST);
+  if(ret) {
+    fprintf(stderr, "Failed to initialize SPI port %d\n", SPI_PORT_TEST);
+    exit(error_handler());
+  }
+  printf("SPI%d Initialized\n", SPI_PORT_TEST);
+
+  ret = task_create(
+    "spi_task2", 
     CONFIG_EXAMPLES_SPI_TEST_PRIORITY,
     CONFIG_EXAMPLES_SPI_TEST_STACKSIZE, 
-    spi_test_task1,
+    spi_test_task2,
     NULL);
-    
+ 
   if (ret < 0) {
     int errcode = errno;
-    fprintf(stderr, "Failed to start spi_task1: %d\n", errcode);
+    fprintf(stderr, "Failed to start spi_task2: %d\n", errcode);
     return EXIT_FAILURE;
   }
 
